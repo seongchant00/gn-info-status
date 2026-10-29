@@ -1,0 +1,233 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>정보교사 현황</title><style>body{margin:0;font:16px/1.55 -apple-system,"Apple SD Gothic Neo","Noto Sans KR",sans-serif;background:#fbfbf9;color:#1d1f21}main{max-width:1120px;margin:0 auto;padding:24px 16px}@media (prefers-color-scheme:dark){body{background:#17191b;color:#e8e8e4}}</style></head><body><main><h1 style="font-size:22px">구리남양주 정보교사 현황</h1><p>교육청 공식 자료 아님, 참고용입니다.</p><p id="msg">불러오는 중이에요…</p></main><script>/** 학년도 마감 요약(설계 5장, 기본 3월 15일)과 추세. 사립도 추세에는 넣는다. */
+var YearClose = (function () {
+  function shouldClose(now, year, summaries, settings) {
+    var md = settings.closeMonthDay.split('-');
+    var closeAt = new Date(Number(year), Number(md[0]) - 1, Number(md[1]));
+    if (now.getTime() < closeAt.getTime()) return false;
+    return !(summaries || []).some(function (s) { return Number(s.year) === Number(year); });
+  }
+
+  function sum(xs) {
+    return xs.reduce(function (a, b) { return a + b; }, 0);
+  }
+
+  function known(v) {
+    return !(v === null || v === undefined || v === '');
+  }
+
+  function summarize(model, now) {
+    var rows = [];
+    model.groups.forEach(function (g) {
+      g.rows.forEach(function (r) { if (r.status === '입력' || r.status === '사립') rows.push(r); });
+    });
+    var teachers = [];
+    rows.forEach(function (r) { r.hours.teachers.forEach(function (t) { if (known(t.total)) teachers.push(t); }); });
+    var total = sum(teachers.map(function (t) { return t.total; }));
+    var extra = sum(teachers.map(function (t) { return Number(t.extraHours || 0); }));
+    return {
+      year: model.year,
+      closedAt: now,
+      schoolsEntered: rows.length,
+      seatsTotal: sum(rows.map(function (r) { return Number(r.seatsNext || 0); })),
+      regularTotal: sum(rows.map(function (r) { return Number(r.regular || 0); })),
+      vacancyTotal: sum(rows.map(function (r) { return r.vacancy > 0 ? r.vacancy : 0; })),
+      classHoursTotal: sum(rows.map(function (r) { return Number(r.hours.classHoursNow || 0); })),
+      avgFinalHours: teachers.length ? Math.round(total / teachers.length * 10) / 10 : null,
+      extraShare: total > 0 ? Math.round(extra / total * 100) / 100 : null
+    };
+  }
+
+  function trend(summaries) {
+    return (summaries || []).slice().sort(function (a, b) { return Number(a.year) - Number(b.year); });
+  }
+
+  return { shouldClose: shouldClose, summarize: summarize, trend: trend };
+})();
+
+if (typeof module !== 'undefined') module.exports = YearClose;
+
+/**
+ * 화면 모델 → 웹앱 HTML. 메모는 누구나 입력하므로 동적 문자열은 모두 escape를 거친다.
+ * links: { base: 웹앱 주소, form: 입력 폼 주소 }. 웹앱은 iframe 안에서 열려 링크는 _top으로 연다.
+ */
+var Page = (function () {
+  var CERTAINTY_CLASS = { '논의 중': 'c-talk', '학교 내 결정': 'c-school', '교육청 확정': 'c-office' };
+
+  function escape(s) {
+    if (s === null || s === undefined) return '';
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function num(v) {
+    return v === null || v === undefined || v === '' ? '–' : escape(v);
+  }
+
+  function vacancyText(r) {
+    if (r.vacancy === null) return '모름';
+    if (r.vacancy < 0) return '과원 ' + (-r.vacancy);
+    if (r.vacancy > 0 && r.contract > 0) return r.vacancy + ' (기간제 ' + Math.min(r.contract, r.vacancy) + ')';
+    return String(r.vacancy);
+  }
+
+  function outText(o) {
+    var parts = [];
+    if (o.transfer) parts.push('전출 ' + o.transfer);
+    if (o.leave) parts.push('휴직 ' + o.leave);
+    if (o.retire) parts.push('퇴직 ' + o.retire);
+    return parts.length ? parts.join(' · ') : '없음';
+  }
+
+  function hoursCell(h) {
+    var top = [];
+    if (h.classHoursNow !== null) top.push('교과 ' + escape(h.classHoursNow) + (h.semester ? ' (' + escape(h.semester) + ')' : ''));
+    if (h.needByHours !== null) top.push('내년 ' + escape(h.nextPeak) + '시간 = ' + escape(h.needByHours) + '명분');
+    var teachers = h.teachers.filter(function (t) { return t.total !== null; }).map(function (t) {
+      return t.extraHours ? escape(t.classHours || 0) + ' + ' + escape(t.extraHours) + ' = ' + escape(t.total) : escape(t.total);
+    });
+    var html = top.length ? '<div>' + top.join(' · ') + '</div>' : '';
+    if (teachers.length) html += '<div class="sub">1인 ' + teachers.join(', ') + '</div>';
+    return html || '–';
+  }
+
+  function certaintyBadge(c) {
+    return '<span class="cert ' + (CERTAINTY_CLASS[c] || '') + '">' + escape(c) + '</span>';
+  }
+
+  function schoolBody(r) {
+    if (r.status === '입력 없음') {
+      return '<tbody data-vacancy="-999"><tr class="empty"><th scope="row">' + escape(r.name) + '</th>' +
+        '<td colspan="7">입력 없음</td></tr></tbody>';
+    }
+    var name = escape(r.name) + (r.status === '사립' ? ' <span class="tag">사립</span>' : '');
+    var main = '<tr class="' + (r.stale ? 'stale' : '') + '">' +
+      '<th scope="row">' + name + '</th>' +
+      '<td data-label="정원">' + num(r.seatsNow) + ' → ' + num(r.seatsNext) + '</td>' +
+      '<td data-label="빠짐">' + outText(r.out) + '</td>' +
+      '<td data-label="복직">' + (r.returning || '없음') + '</td>' +
+      '<td data-label="빈자리" class="vac' + (r.oversupply ? ' over' : r.vacancy > 0 ? ' open' : '') + '">' + vacancyText(r) + '</td>' +
+      '<td data-label="확실성">' + certaintyBadge(r.certainty) + '</td>' +
+      '<td data-label="시수">' + hoursCell(r.hours) + '</td>' +
+      '<td data-label="기준일">' + escape(r.submittedAt) + (r.stale ? ' <span class="tag">오래됨</span>' : '') + '</td>' +
+      '</tr>';
+    var notes = [];
+    r.warnings.forEach(function (w) { notes.push('<p class="warn">' + escape(w) + '</p>'); });
+    if (r.seatReasons) notes.push('<p>정원 변동: ' + escape(r.seatReasons) + '</p>');
+    if (r.hours.subjects.length) {
+      notes.push('<p>과목: ' + r.hours.subjects.map(function (s) { return escape(s.name) + ' ' + escape(s.hours); }).join(', ') + '</p>');
+    }
+    if (r.memo) notes.push('<p>메모: ' + escape(r.memo) + '</p>');
+    if (r.history.length) {
+      notes.push('<details><summary>이전 기록 ' + r.history.length + '건</summary><ul>' +
+        r.history.map(function (h) {
+          return '<li>' + escape(h.submittedAt) + ' · 정원 ' + num(h.seatsNext) + ' · 빈자리 ' +
+            (h.vacancy === null ? '모름' : h.vacancy < 0 ? '과원 ' + (-h.vacancy) : h.vacancy) + ' · ' + escape(h.certainty) + '</li>';
+        }).join('') + '</ul></details>');
+    }
+    var detail = notes.length ? '<tr class="detail"><td colspan="8">' + notes.join('') + '</td></tr>' : '';
+    var sortKey = r.vacancy === null ? -500 : r.vacancy;
+    return '<tbody data-vacancy="' + sortKey + '">' + main + detail + '</tbody>';
+  }
+
+  function tableView(model) {
+    return model.groups.filter(function (g) { return g.rows.length; }).map(function (g) {
+      return '<section><h2>' + escape(g.city) + ' ' + (g.level === '중' ? '중학교' : '고등학교') + '</h2>' +
+        '<table><thead><tr><th scope="col">학교</th><th scope="col">정원 올해 → 내년</th><th scope="col">빠짐</th>' +
+        '<th scope="col">복직</th><th scope="col">예상 빈자리</th><th scope="col">확실성</th><th scope="col">시수</th>' +
+        '<th scope="col">기준일</th></tr></thead>' + g.rows.map(schoolBody).join('') + '</table></section>';
+    }).join('');
+  }
+
+  function trendView(trend) {
+    var rows = YearClose.trend(trend);
+    if (!rows.length) return '<p class="empty-note">아직 마감한 학년도가 없어요. 매년 3월 15일에 그 학년도 기록을 마감해요.</p>';
+    return '<table class="trend"><thead><tr><th scope="col">학년도</th><th scope="col">입력 학교</th><th scope="col">정원</th>' +
+      '<th scope="col">정규 재직(전 해)</th><th scope="col">예상 빈자리</th><th scope="col">교과 시수(전 해)</th>' +
+      '<th scope="col">1인 평균 최종 시수(전 해)</th><th scope="col">교과 외 비중(전 해)</th></tr></thead><tbody>' +
+      rows.map(function (s) {
+        return '<tr><th scope="row">' + escape(s.year) + '학년도</th>' +
+          '<td data-label="입력 학교">' + num(s.schoolsEntered) + '</td>' +
+          '<td data-label="정원">' + num(s.seatsTotal) + '</td>' +
+          '<td data-label="정규 재직">' + num(s.regularTotal) + '</td>' +
+          '<td data-label="예상 빈자리">' + num(s.vacancyTotal) + '</td>' +
+          '<td data-label="교과 시수">' + num(s.classHoursTotal) + '</td>' +
+          '<td data-label="1인 평균 최종 시수">' + num(s.avgFinalHours) + '</td>' +
+          '<td data-label="교과 외 비중">' + (s.extraShare === null || s.extraShare === undefined || s.extraShare === '' ? '–' : Math.round(s.extraShare * 100) + '%') + '</td></tr>';
+      }).join('') + '</tbody></table>';
+  }
+
+  var CSS = [
+    ':root{--bg:#fbfbf9;--fg:#1d1f21;--muted:#55595e;--line:#dcdcd6;--accent:#1f5fa8;--open:#17663a;--over:#a8321f;',
+    '--talk-bg:#f1ede2;--talk-fg:#5c4b17;--school-bg:#e3ecf7;--school-fg:#1d4f8a;--office-bg:#e1f1e6;--office-fg:#17663a}',
+    '@media (prefers-color-scheme:dark){:root{--bg:#17191b;--fg:#e8e8e4;--muted:#a9adb2;--line:#33373b;--accent:#8cb8ec;',
+    '--open:#7fd39f;--over:#f19a88;--talk-bg:#3a3424;--talk-fg:#e8d9a8;--school-bg:#1f3048;--school-fg:#b5d0f0;--office-bg:#1d3a28;--office-fg:#a7e2bb}}',
+    '*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 -apple-system,"Apple SD Gothic Neo","Noto Sans KR",sans-serif}',
+    'main{max-width:1120px;margin:0 auto;padding:24px 16px 48px}h1{font-size:22px;margin:0 0 4px}h2{font-size:18px;margin:32px 0 8px}',
+    '.notice{color:var(--muted);margin:0 0 12px}.summary{font-size:18px;margin:0 0 16px}.summary b{color:var(--open)}',
+    'nav{display:flex;flex-wrap:wrap;gap:8px;align-items:center;border-bottom:1px solid var(--line);padding-bottom:12px}',
+    'nav a,nav button{min-height:44px;display:inline-flex;align-items:center;padding:0 14px;color:var(--accent);text-decoration:none;font:inherit;background:none;border:0;cursor:pointer}',
+    'nav a[aria-current]{color:var(--fg);font-weight:700;border-bottom:3px solid var(--fg)}nav .primary{margin-left:auto;background:var(--accent);color:var(--bg);border-radius:6px;font-weight:700}',
+    'table{width:100%;border-collapse:collapse}th,td{text-align:left;vertical-align:top;padding:10px 8px;border-bottom:1px solid var(--line)}',
+    'thead th{font-size:14px;color:var(--muted);font-weight:600}tbody th{font-weight:700;white-space:nowrap}',
+    '.sub{color:var(--muted);font-size:14px}.vac{font-weight:700}.vac.open{color:var(--open)}.vac.over{color:var(--over)}',
+    '.cert{display:inline-block;padding:2px 8px;border-radius:4px;font-size:14px;font-weight:600;white-space:nowrap}',
+    '.c-talk{background:var(--talk-bg);color:var(--talk-fg)}.c-school{background:var(--school-bg);color:var(--school-fg)}.c-office{background:var(--office-bg);color:var(--office-fg)}',
+    '.tag{font-size:13px;color:var(--muted);font-weight:400}tr.stale td,tr.stale th{opacity:.6}tr.empty td{color:var(--muted)}',
+    'tr.detail td{padding-top:0;font-size:14px;color:var(--muted)}tr.detail p{margin:0 0 4px}.warn{color:var(--over)!important}',
+    'details summary{cursor:pointer;min-height:32px;color:var(--accent)}details ul{margin:4px 0 0;padding-left:20px}',
+    'tr:has(+ tr.detail) td,tr:has(+ tr.detail) th{border-bottom:0}.empty-note{color:var(--muted);margin-top:24px}',
+    '@media (min-width:721px){table:not(.trend){table-layout:fixed}table:not(.trend) thead th:nth-child(1){width:13%}',
+    'table:not(.trend) thead th:nth-child(2){width:11%}table:not(.trend) thead th:nth-child(3){width:11%}table:not(.trend) thead th:nth-child(4){width:7%}',
+    'table:not(.trend) thead th:nth-child(5){width:11%}table:not(.trend) thead th:nth-child(6){width:12%}table:not(.trend) thead th:nth-child(8){width:12%}}',
+    '@media (max-width:720px){thead{display:none}table,tbody,tr,th,td{display:block}tbody{border-bottom:1px solid var(--line);padding:8px 0}',
+    'th,td{border:0;padding:2px 0}td[data-label]::before{content:attr(data-label) "  ";color:var(--muted);font-size:14px;margin-right:6px}',
+    'tr.detail td{padding-top:4px}nav .primary{margin-left:0}}'
+  ].join('');
+
+  var SORT_SCRIPT = '<script>(function(){var b=document.getElementById("sort");if(!b)return;var on=false;' +
+    'b.addEventListener("click",function(){on=!on;b.textContent=on?"학교 이름 순":"빈자리 많은 순";' +
+    'document.querySelectorAll("table").forEach(function(t){var bs=[].slice.call(t.tBodies);' +
+    'bs.forEach(function(x,i){if(!x.dataset.i)x.dataset.i=i;});bs.sort(function(a,c){return on?Number(c.dataset.vacancy)-Number(a.dataset.vacancy)||a.dataset.i-c.dataset.i:a.dataset.i-c.dataset.i;});' +
+    'bs.forEach(function(x){t.appendChild(x);});});});})();<\/script>';
+
+  function render(model, trend, view, links) {
+    var l = links || {};
+    var s = model.summary;
+    var summaryLine = '예상 빈자리 <b>' + s.vacancy + '</b> (교육청 확정 ' + s.byCertainty['교육청 확정'] +
+      ' · 학교 내 결정 ' + s.byCertainty['학교 내 결정'] + ' · 논의 중 ' + s.byCertainty['논의 중'] + ')' +
+      ' · 과원 ' + s.oversupplySchools + '곳 · 입력 ' + s.entered + '/' + s.publicTotal + '교';
+    var isTrend = view === 'trend';
+    var nav = '<nav>' +
+      '<a href="' + escape(l.base) + '?view=table" target="_top"' + (isTrend ? '' : ' aria-current="page"') + '>학교별</a>' +
+      '<a href="' + escape(l.base) + '?view=trend" target="_top"' + (isTrend ? ' aria-current="page"' : '') + '>학년도 추세</a>' +
+      (isTrend ? '' : '<button type="button" id="sort">빈자리 많은 순</button>') +
+      (l.form ? '<a class="primary" href="' + escape(l.form) + '" target="_blank" rel="noopener">우리 학교 입력하기</a>' : '') +
+      '</nav>';
+    return '<!doctype html><html lang="ko"><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width, initial-scale=1"><title>정보교사 현황</title>' +
+      '<style>' + CSS + '</style></head><body><main>' +
+      '<h1>구리남양주 정보교사 현황 · ' + escape(model.year) + '학년도</h1>' +
+      '<p class="notice">' + escape(model.notice) + '</p>' +
+      (isTrend ? '' : '<p class="summary">' + summaryLine + '</p>') +
+      nav + (isTrend ? trendView(trend) : tableView(model)) +
+      '</main>' + (isTrend ? '' : SORT_SCRIPT) + '</body></html>';
+  }
+
+  return { escape: escape, render: render };
+})();
+
+if (typeof module !== 'undefined') module.exports = Page;
+</script><script>
+(function () {
+  var URL = "https://script.google.com/macros/s/AKfycbzzBceCNjOFNKgxTQceAuMac3e1WxGF8l_amYt9VJVQ2Kbyu5Q6Ttp5cHS_uCdbNFL-SA/exec?format=json";
+  var view = /[?&]view=trend(&|$)/.test(location.search) ? 'trend' : 'table';
+  var msg = document.getElementById('msg');
+  fetch(URL, { credentials: 'omit' })
+    .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(function (d) {
+      var html = Page.render(d.model, d.trend, view, { base: location.pathname, form: d.form });
+      document.open(); document.write(html); document.close();
+    })
+    .catch(function () { msg.textContent = '정보교사 현황를 불러오지 못했어요. 잠시 뒤 새로고침해 주세요.'; });
+})();</script></body></html>
