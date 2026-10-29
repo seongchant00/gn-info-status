@@ -97,7 +97,7 @@ var Page = (function () {
 
   function schoolBody(r) {
     if (r.status === '입력 없음') {
-      return '<tbody data-vacancy="-999"><tr class="empty"><th scope="row">' + escape(r.name) + '</th>' +
+      return '<tbody id="s-' + escape(r.code) + '" data-vacancy="-999"><tr class="empty"><th scope="row">' + escape(r.name) + '</th>' +
         '<td colspan="7">입력 없음</td></tr></tbody>';
     }
     var name = escape(r.name) + (r.status === '사립' ? ' <span class="tag">사립</span>' : '');
@@ -127,7 +127,56 @@ var Page = (function () {
     }
     var detail = notes.length ? '<tr class="detail"><td colspan="8">' + notes.join('') + '</td></tr>' : '';
     var sortKey = r.vacancy === null ? -500 : r.vacancy;
-    return '<tbody data-vacancy="' + sortKey + '">' + main + detail + '</tbody>';
+    return '<tbody id="s-' + escape(r.code) + '" data-vacancy="' + sortKey + '">' + main + detail + '</tbody>';
+  }
+
+  var MARK_COLORS = { open: '#17663a', over: '#a8321f', even: '#1f5fa8', unknown: '#a06b00', none: '#8a8f95' };
+  var MARK_LABELS = [['open', '빈자리 있음'], ['even', '빈자리 없음'], ['over', '과원'], ['unknown', '빈자리 모름'], ['none', '입력 없음']];
+
+  function markKind(r) {
+    if (r.status === '입력 없음') return { kind: 'none', label: '입력 없음' };
+    if (r.vacancy === null) return { kind: 'unknown', label: '빈자리 모름' };
+    if (r.vacancy > 0) return { kind: 'open', label: '빈자리 ' + r.vacancy };
+    if (r.vacancy < 0) return { kind: 'over', label: '과원 ' + (-r.vacancy) };
+    return { kind: 'even', label: '빈자리 없음' };
+  }
+
+  // 지도 표식. 같은 캠퍼스(중·고)처럼 좌표가 겹치는 학교는 동쪽으로 조금씩 떨어뜨려 둘 다 보이게 한다.
+  function mapMarkers(model) {
+    var seen = {};
+    var out = [];
+    model.groups.forEach(function (g) {
+      g.rows.forEach(function (r) {
+        if (typeof r.lat !== 'number' || typeof r.lng !== 'number') return;
+        var key = r.lat.toFixed(5) + ',' + r.lng.toFixed(5);
+        var n = seen[key] || 0;
+        seen[key] = n + 1;
+        var k = markKind(r);
+        out.push({ code: r.code, name: r.name, lat: r.lat, lng: r.lng + n * 0.0007, kind: k.kind, label: k.label });
+      });
+    });
+    return out;
+  }
+
+  function mapBlock(markers) {
+    if (!markers.length) return '';
+    var data = JSON.stringify({ marks: markers, colors: MARK_COLORS }).replace(/</g, '\\u003c');
+    var legend = MARK_LABELS.map(function (l) {
+      return '<span class="lg"><i style="background:' + MARK_COLORS[l[0]] + '"></i>' + l[1] + '</span>';
+    }).join('');
+    return '<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">' +
+      '<section class="mapwrap"><div id="map" role="img" aria-label="학교 위치 지도"></div><p class="legend">' + legend + '</p></section>' +
+      '<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"><\/script>' +
+      '<script>(function(){if(!window.L)return;var d=' + data + ';' +
+      'var map=L.map("map",{scrollWheelZoom:false});' +
+      'L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:18,attribution:"&copy; OpenStreetMap"}).addTo(map);' +
+      'var pts=[];d.marks.forEach(function(m){var c=d.colors[m.kind];' +
+      'var mk=L.circleMarker([m.lat,m.lng],{radius:m.kind==="none"?6:9,color:"#fff",weight:2,fillColor:c,fillOpacity:m.kind==="none"?0.7:0.95}).addTo(map);' +
+      'var el=document.createElement("div");var b=document.createElement("b");b.textContent=m.name;el.appendChild(b);' +
+      'el.appendChild(document.createElement("br"));el.appendChild(document.createTextNode(m.label+" "));' +
+      'var a=document.createElement("a");a.href="#s-"+m.code;a.textContent="표에서 보기";el.appendChild(a);' +
+      'mk.bindPopup(el);mk.bindTooltip(m.name);pts.push([m.lat,m.lng]);});' +
+      'map.fitBounds(pts,{padding:[20,20]});})();<\/script>';
   }
 
   function tableView(model) {
@@ -180,6 +229,11 @@ var Page = (function () {
     '@media (min-width:721px){table:not(.trend){table-layout:fixed}table:not(.trend) thead th:nth-child(1){width:13%}',
     'table:not(.trend) thead th:nth-child(2){width:11%}table:not(.trend) thead th:nth-child(3){width:11%}table:not(.trend) thead th:nth-child(4){width:7%}',
     'table:not(.trend) thead th:nth-child(5){width:11%}table:not(.trend) thead th:nth-child(6){width:12%}table:not(.trend) thead th:nth-child(8){width:12%}}',
+    '.mapwrap{margin:16px 0 0}#map{height:380px;border-radius:6px;border:1px solid var(--line)}',
+    '.legend{display:flex;flex-wrap:wrap;gap:4px 16px;margin:8px 0 0;font-size:14px;color:var(--muted)}',
+    '.lg i{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:6px;vertical-align:-1px}',
+    'tbody:target th{color:var(--accent)}',
+    '@media (max-width:720px){#map{height:300px}}',
     '@media (max-width:720px){thead{display:none}table,tbody,tr,th,td{display:block}tbody{border-bottom:1px solid var(--line);padding:8px 0}',
     'th,td{border:0;padding:2px 0}td[data-label]::before{content:attr(data-label) "  ";color:var(--muted);font-size:14px;margin-right:6px}',
     'tr.detail td{padding-top:4px}nav .primary{margin-left:0}}'
@@ -210,11 +264,11 @@ var Page = (function () {
       '<h1>구리남양주 정보교사 현황 · ' + escape(model.year) + '학년도</h1>' +
       '<p class="notice">' + escape(model.notice) + '</p>' +
       (isTrend ? '' : '<p class="summary">' + summaryLine + '</p>') +
-      nav + (isTrend ? trendView(trend) : tableView(model)) +
+      nav + (isTrend ? trendView(trend) : mapBlock(mapMarkers(model)) + tableView(model)) +
       '</main>' + (isTrend ? '' : SORT_SCRIPT) + '</body></html>';
   }
 
-  return { escape: escape, render: render };
+  return { escape: escape, render: render, mapMarkers: mapMarkers };
 })();
 
 if (typeof module !== 'undefined') module.exports = Page;
